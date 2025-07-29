@@ -14,17 +14,19 @@ from nnunetv2.experiment_planning.experiment_planners.network_topology import ge
 class U2NetPlanner(ExperimentPlanner):
     def __init__(self, dataset_name_or_id: Union[str, int],
                  gpu_memory_target_in_gb: float = 8,
-                 preprocessor_name: str = 'DefaultPreprocessor', plans_name: str = 'nnUNetU2NetPlans',
+                 preprocessor_name: str = 'DefaultPreprocessor', plans_name: str = 'U2NetPlans',
                  overwrite_target_spacing: Union[List[float], Tuple[float, ...]] = None,
                  suppress_transpose: bool = False):
         super().__init__(dataset_name_or_id, gpu_memory_target_in_gb, preprocessor_name, plans_name,
                          overwrite_target_spacing, suppress_transpose)
         self.UNet_class = U2Net
         # the following two numbers are reference values for VRAM estimation
-        self.UNet_reference_val_3d = 680000000
+        self.UNet_reference_val_3d = 48000000
         self.UNet_reference_val_2d = 135000000
         # RSU depths for each stage
-        self.depth_per_stage = [7,6,5,4,4]
+        self.depth_per_stage = [7,6,5,4,4,4,4,4,4]
+        self.UNet_max_features_3d = 512
+        self.UNet_max_features_2d = 1024
 
     def generate_data_identifier(self, configuration_name: str) -> str:
         """
@@ -92,20 +94,19 @@ class U2NetPlanner(ExperimentPlanner):
                 'conv_op': unet_conv_op.__module__ + '.' + unet_conv_op.__name__,
                 'kernel_sizes': conv_kernel_sizes,
                 'strides': pool_op_kernel_sizes,
-                'num_classes': len(self.dataset_json['labels'].keys()),
                 'deep_supervision': True,
                 'conv_bias': True,
                 'norm_op': norm.__module__ + '.' + norm.__name__,
                 'norm_op_kwargs': {'eps': 1e-5, 'affine': True},
                 'dropout_op': None,
                 'dropout_op_kwargs': None,
-                'nonlin': 'torch.nn.sigmoid',
+                'nonlin': nn.Sigmoid.__module__ + '.' + nn.Sigmoid.__name__,  # Use string path
                 'nonlin_kwargs': {'inplace': True},
-                'blocks_nonlin': 'torch.nn.ReLU',
+                'blocks_nonlin': nn.ReLU.__module__ + '.' + nn.ReLU.__name__,  # Use string path
                 'blocks_nonlin_kwargs': {'inplace': True},
                 'depth_per_stage': depth_per_stage,
             },
-            '_kw_requires_import': ('conv_op', 'norm_op', 'dropout_op', 'nonlin'),
+            '_kw_requires_import': ('conv_op', 'norm_op', 'dropout_op', 'nonlin', 'blocks_nonlin'), 
         }
 
         # now estimate vram consumption
@@ -203,19 +204,19 @@ class U2NetPlanner(ExperimentPlanner):
         return plan
 
 
-if __name__ == '__main__':
-    # Test memory estimation for U2Net
-    net = U2Net(input_channels=1, n_stages=6, features_per_stage=(32, 64, 128, 256, 320, 320),
-                conv_op=nn.Conv3d, kernel_sizes=3, strides=(1, 2, 2, 2, 2, 2),
-                num_classes=3, 
-                conv_bias=True, norm_op=nn.InstanceNorm3d, norm_op_kwargs={}, dropout_op=None,
-                nonlin=nn.LeakyReLU, nonlin_kwargs={'inplace': True}, deep_supervision=True)
-    print(net.compute_conv_feature_map_size((128, 128, 128)))  # VRAM reference value for 3D
+# if __name__ == '__main__':
+#     # Test memory estimation for U2Net
+#     net = U2Net(input_channels=1, n_stages=6, features_per_stage=(32, 64, 128, 256, 512, 512),
+#                 conv_op=nn.Conv3d, kernel_sizes=3, strides=(1, 2, 2, 2, 2, 2),
+#                 num_classes=3, 
+#                 conv_bias=True, norm_op=nn.InstanceNorm3d, norm_op_kwargs={}, dropout_op=None,
+#                 nonlin=nn.LeakyReLU, nonlin_kwargs={'inplace': True}, deep_supervision=True)
+#     print(net.compute_conv_feature_map_size((128, 128, 128)))  # VRAM reference value for 3D
 
-    net = U2Net(input_channels=1, n_stages=7, features_per_stage=(32, 64, 128, 256, 512, 512, 512),
-                conv_op=nn.Conv2d, kernel_sizes=3, strides=(1, 2, 2, 2, 2, 2, 2),
-                num_classes=3,
-                conv_bias=True, norm_op=nn.InstanceNorm2d, norm_op_kwargs={}, dropout_op=None,
-                nonlin=nn.LeakyReLU, nonlin_kwargs={'inplace': True}, deep_supervision=True)
-    print(net.compute_conv_feature_map_size((512, 512)))  # VRAM reference value for 2D
+#     net = U2Net(input_channels=1, n_stages=7, features_per_stage=(32, 64, 128, 256, 512, 512, 512),
+#                 conv_op=nn.Conv2d, kernel_sizes=3, strides=(1, 2, 2, 2, 2, 2, 2),
+#                 num_classes=3,
+#                 conv_bias=True, norm_op=nn.InstanceNorm2d, norm_op_kwargs={}, dropout_op=None,
+#                 nonlin=nn.LeakyReLU, nonlin_kwargs={'inplace': True}, deep_supervision=True)
+#     print(net.compute_conv_feature_map_size((512, 512)))  # VRAM reference value for 2D
 
