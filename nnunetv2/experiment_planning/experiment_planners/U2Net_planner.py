@@ -21,12 +21,17 @@ class U2NetPlanner(ExperimentPlanner):
                          overwrite_target_spacing, suppress_transpose)
         self.UNet_class = U2Net
         # the following two numbers are reference values for VRAM estimation
-        self.UNet_reference_val_3d = 48000000
+        self.UNet_reference_val_3d = 680000000
         self.UNet_reference_val_2d = 135000000
+
+        self.max_2d_stages = 5  # can be useful to set a maximum number of stages for 2D without having to reduce UNet_reference_val_2d in order to keep a reasonable patch size.
+        self.max_3d_stages = 5  # can be useful to set a maximum number of stages for 3D without having to reduce UNet_reference_val_3d in order to keep a reasonable patch size.
         # RSU depths for each stage
-        self.depth_per_stage = [7,6,5,4,4,4,4,4,4]
-        self.UNet_max_features_3d = 512
-        self.UNet_max_features_2d = 1024
+        self.depth_per_stage = [7, 6, 5, 4, 4, 4, 4, 4, 4]
+
+        # next two lines override the default value in ExperimentPlanner
+        self.UNet_max_features_3d = 320  # default is 320
+        self.UNet_max_features_2d = 512  # default is 512
 
     def generate_data_identifier(self, configuration_name: str) -> str:
         """
@@ -81,6 +86,13 @@ class U2NetPlanner(ExperimentPlanner):
                                                              self.UNet_featuremap_min_edge_length,
                                                              999999)
         num_stages = len(pool_op_kernel_sizes)
+
+        # Apply the maximum stages limit for 3D
+        if len(spacing) == 3 and self.max_3d_stages is not None and num_stages > self.max_3d_stages:
+            # Limit the number of stages for 3D
+            num_stages = self.max_3d_stages
+            pool_op_kernel_sizes = pool_op_kernel_sizes[:num_stages]
+            conv_kernel_sizes = conv_kernel_sizes[:num_stages]
 
         # Use appropriate depths for RSU blocks
         depth_per_stage = self.depth_per_stage[:num_stages]
@@ -147,6 +159,13 @@ class U2NetPlanner(ExperimentPlanner):
                                                                  999999)
 
             num_stages = len(pool_op_kernel_sizes)
+            # Apply the maximum stages limit for 3D
+            if len(spacing) == 3 and self.max_3d_stages is not None and num_stages > self.max_3d_stages:
+                # Limit the number of stages for 3D
+                num_stages = self.max_3d_stages
+                pool_op_kernel_sizes = pool_op_kernel_sizes[:num_stages]
+                conv_kernel_sizes = conv_kernel_sizes[:num_stages]
+
             depth_per_stage = self.depth_per_stage[:num_stages]
 
             architecture_kwargs['arch_kwargs'].update({
@@ -204,19 +223,5 @@ class U2NetPlanner(ExperimentPlanner):
         return plan
 
 
-# if __name__ == '__main__':
-#     # Test memory estimation for U2Net
-#     net = U2Net(input_channels=1, n_stages=6, features_per_stage=(32, 64, 128, 256, 512, 512),
-#                 conv_op=nn.Conv3d, kernel_sizes=3, strides=(1, 2, 2, 2, 2, 2),
-#                 num_classes=3, 
-#                 conv_bias=True, norm_op=nn.InstanceNorm3d, norm_op_kwargs={}, dropout_op=None,
-#                 nonlin=nn.LeakyReLU, nonlin_kwargs={'inplace': True}, deep_supervision=True)
-#     print(net.compute_conv_feature_map_size((128, 128, 128)))  # VRAM reference value for 3D
 
-#     net = U2Net(input_channels=1, n_stages=7, features_per_stage=(32, 64, 128, 256, 512, 512, 512),
-#                 conv_op=nn.Conv2d, kernel_sizes=3, strides=(1, 2, 2, 2, 2, 2, 2),
-#                 num_classes=3,
-#                 conv_bias=True, norm_op=nn.InstanceNorm2d, norm_op_kwargs={}, dropout_op=None,
-#                 nonlin=nn.LeakyReLU, nonlin_kwargs={'inplace': True}, deep_supervision=True)
-#     print(net.compute_conv_feature_map_size((512, 512)))  # VRAM reference value for 2D
 
