@@ -10,6 +10,8 @@ from nnunetv2.experiment_planning.experiment_planners.default_experiment_planner
 
 from nnunetv2.experiment_planning.experiment_planners.network_topology import get_pool_and_conv_props
 
+__author__ = ["Stefano Petraccini"]
+__email__ = ["stefano.petraccini@studio.unibo.it"]
 
 class U2NetPlanner(ExperimentPlanner):
     def __init__(self, dataset_name_or_id: Union[str, int],
@@ -24,10 +26,12 @@ class U2NetPlanner(ExperimentPlanner):
         self.UNet_reference_val_3d = 680000000
         self.UNet_reference_val_2d = 135000000
 
-        self.max_2d_stages = 5  # can be useful to set a maximum number of stages for 2D without having to reduce UNet_reference_val_2d in order to keep a reasonable patch size.
-        self.max_3d_stages = 5  # can be useful to set a maximum number of stages for 3D without having to reduce UNet_reference_val_3d in order to keep a reasonable patch size.
+        # can be useful to set a maximum number of stages without having to reduce UNet_reference_val_ in order to keep a reasonable patch size.
+        self.max_2d_stages = 5  
+        self.max_3d_stages = 4  
+        
         # RSU depths for each stage
-        self.depth_per_stage = [7, 6, 5, 4, 4, 4, 4, 4, 4]
+        self.depth_per_stage = [7, 6, 5, 4, 4] #if changing self.max_3d_stages or self.max_2d_stages, make sure this is consistent.
 
         # next two lines override the default value in ExperimentPlanner
         self.UNet_max_features_3d = 320  # default is 320
