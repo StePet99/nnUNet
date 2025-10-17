@@ -114,3 +114,6 @@ ENV/
 *.model
 
 !documentation/assets/scribble_example.png
+
+# mac stuff
+.DS_Store
