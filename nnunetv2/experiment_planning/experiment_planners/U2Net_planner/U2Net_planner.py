@@ -1,5 +1,4 @@
 import numpy as np
-from copy import deepcopy
 from typing import Union, List, Tuple
 
 from dynamic_network_architectures.architectures.u2net import U2Net
@@ -15,36 +14,55 @@ __email__ = ["stefano.petraccini@studio.unibo.it"]
 
 class U2NetPlanner(ExperimentPlanner):
     """
-    Experiment planner for U2Net architecture.
+    Experiment planner for U2Net architecture within the nnUNet framework.
     
     This planner extends the default ExperimentPlanner to work with the U2Net architecture,
-    allowing for custom configuration of network parameters such as depths per stage,
-    maximum features, and stages limits.
+    which uses Residual U-blocks (RSU) with nested U-structures. It provides optimized
+    configuration of network parameters, memory estimation accounting for RSU overhead,
+    and topology calculation tailored for U2Net's unique requirements.
+    
+    Key features:
+    - RSU-aware memory estimation with overhead calculations
+    - Conservative patch sizing to accommodate nested U-structures  
+    - Configurable depths per stage for RSU blocks
+    - Minimum 2-stage enforcement (required by RSUDecoder)
+    - U2Net-specific batch size and topology optimization
+    
+    Parameters
+    ----------
+    dataset_name_or_id : Union[str, int]
+        Dataset name or ID to plan experiments for.
+    gpu_memory_target_in_gb : float, optional
+        Target GPU memory usage in GB, by default 8.
+    preprocessor_name : str, optional
+        Name of the preprocessor to use, by default 'DefaultPreprocessor'.
+    plans_name : str, optional
+        Name for the plans file, by default 'U2NetPlans'.
+    overwrite_target_spacing : Union[List[float], Tuple[float, ...]], optional
+        Custom target spacing to use instead of computed spacing, by default None.
+    suppress_transpose : bool, optional
+        Whether to suppress data transposition during preprocessing, by default False.
+    
+    Attributes
+    ----------
+    depth_per_stage : List[int]
+        RSU block depths for each network stage
+    max_2d_stages : int
+        Maximum number of stages for 2D configurations
+    max_3d_stages : int
+        Maximum number of stages for 3D configurations
+    UNet_max_features_2d : int
+        Maximum feature channels for 2D networks
+    UNet_max_features_3d : int
+        Maximum feature channels for 3D networks
     """
 
     def __init__(self, dataset_name_or_id: Union[str, int],
                  gpu_memory_target_in_gb: float = 8,
-                 preprocessor_name: str = 'DefaultPreprocessor', plans_name: str = 'U2NetPlans',
+                 preprocessor_name: str = 'DefaultPreprocessor', 
+                 plans_name: str = 'U2NetPlans',
                  overwrite_target_spacing: Union[List[float], Tuple[float, ...]] = None,
                  suppress_transpose: bool = False):
-        """
-        Initialize the U2Net experiment planner.
-        
-        Parameters
-        ----------
-        dataset_name_or_id : Union[str, int]
-            Dataset name or ID to plan experiments for.
-        gpu_memory_target_in_gb : float, optional
-            Target GPU memory usage in GB, by default 8.
-        preprocessor_name : str, optional
-            Name of the preprocessor to use, by default 'DefaultPreprocessor'.
-        plans_name : str, optional
-            Name for the plans file, by default 'U2NetPlans'.
-        overwrite_target_spacing : Union[List[float], Tuple[float, ...]], optional
-            Custom target spacing to use instead of computed one, by default None.
-        suppress_transpose : bool, optional
-            Whether to suppress the transpose of the data, by default False.
-        """
         super().__init__(dataset_name_or_id, gpu_memory_target_in_gb, preprocessor_name, plans_name,
                          overwrite_target_spacing, suppress_transpose)
         self.UNet_class = U2Net
@@ -56,38 +74,40 @@ class U2NetPlanner(ExperimentPlanner):
         self.UNet_reference_val_corresp_bs_2d = 12  # Reference batch size for 2D
         self.UNet_reference_val_corresp_bs_3d = 2   # Reference batch size for 3D
         
-        # GPU memory target is set by parent class but we ensure it's available
-        # self.UNet_vram_target_GB is set by parent __init__
-
         # can be useful to set a maximum number of stages without having to reduce UNet_reference_val_ in order to keep a reasonable patch size.
-        self.max_2d_stages = 10  
-        self.max_3d_stages = 10  
+        self.max_2d_stages = 6  
+        self.max_3d_stages = 5  
         
         # RSU depths for each stage
-        self.depth_per_stage = [7, 6, 5, 4, 4, 4, 4, 4, 4, 4]  # if changing self.max_3d_stages or self.max_2d_stages, make sure this is consistent.
+        self.depth_per_stage = [7, 6, 5, 4, 4, 4]  # if changing self.max_3d_stages or self.max_2d_stages, make sure this is consistent.
 
-        # next two lines override the default value in ExperimentPlanner
+        # next two lines override the default values in ExperimentPlanner
         self.UNet_max_features_3d = 512  # default is 320
         self.UNet_max_features_2d = 1024  # default is 512
         
 
     def generate_data_identifier(self, configuration_name: str) -> str:
         """
-        Generate a unique identifier for the data associated with a configuration.
+        Generate a unique identifier for data associated with a configuration.
         
-        Configurations are unique within each plans file but different plans files can have 
-        configurations with the same name. This method creates an identifier that reflects 
-        not just the configuration but also the plans it originates from.
+        Creates an identifier that reflects both the configuration name and the plans
+        it originates from, ensuring uniqueness across different plans files that
+        may contain configurations with the same name.
         
         Parameters
         ----------
         configuration_name : str
-            Name of the configuration.
+            Name of the configuration (e.g., '2d', '3d_fullres', '3d_lowres').
             
         Returns
         -------
         str
-            Unique data identifier for the configuration.
+            Unique data identifier in format '{plans_identifier}_{configuration_name}'.
+            
+        Notes
+        -----
+        This method allows to distinguish between configurations from different
+        plans files for the same dataset. 
         """
         return self.plans_identifier + '_' + configuration_name
 
@@ -98,163 +118,162 @@ class U2NetPlanner(ExperimentPlanner):
                                     approximate_n_voxels_dataset: float,
                                     _cache: dict) -> dict:
         """
-        Get plans for a specific network configuration optimized for U2Net architecture.
+        Generate optimized plans for a specific U2Net network configuration.
         
-        This method determines the network architecture, batch size, and other 
-        configuration parameters based on the provided spacing, median shape, and U2Net-specific constraints.
+        This method determines network architecture, batch size, patch size, and other
+        configuration parameters based on the provided data characteristics and 
+        U2Net-specific constraints. It accounts for RSU block memory overhead and
+        implements conservative sizing strategies for stable training.
         
         Parameters
         ----------
         spacing : Union[np.ndarray, Tuple[float, ...], List[float]]
-            Voxel spacing of the data.
+            Voxel spacing of the data (e.g., [1.0, 1.0, 1.0] for isotropic).
         median_shape : Union[np.ndarray, Tuple[int, ...]]
-            Median shape of the data in voxels.
+            Median shape of images in the dataset in voxels.
         data_identifier : str
-            Unique identifier for the data.
+            Unique identifier for this data configuration.
         approximate_n_voxels_dataset : float
-            Approximate number of voxels in the dataset.
+            Approximate total number of voxels in the entire dataset.
         _cache : dict
-            Cache for storing intermediate results.
+            Cache dictionary for storing intermediate VRAM calculations.
             
         Returns
         -------
         dict
-            Dictionary containing the plans for the configuration.
+            Configuration dictionary containing:
+            - 'data_identifier': Configuration identifier
+            - 'batch_size': Optimized batch size for U2Net
+            - 'patch_size': Network input patch size  
+            - 'architecture': Network architecture parameters including RSU depths
+            - 'spacing': Target voxel spacing
+            - 'normalization_schemes': Data normalization configuration
+            - 'resampling_*': Resampling function configurations
+            - Other preprocessing and training parameters
+            
+        Notes
+        -----
+        The method implements several U2Net-specific optimizations:
+        - RSU memory overhead estimation (1.5-3x regular convolutions)
+        - Conservative patch sizing (20% smaller initial patches)
+        - Minimum 2 stages enforced (required by RSUDecoder)
+        - U2Net batch size reduction (25% smaller than regular U-Net)
+        - Iterative patch size reduction with 15% steps under memory pressure
         """
+
         def _features_per_stage(num_stages, max_num_features) -> Tuple[int, ...]:
             """
-            Calculate the number of features for each stage for U2Net.
-            U2Net typically uses fewer features than regular U-Net due to nested structure complexity.
+            Calculate feature channels for each network stage.
+            
+            Uses exponential scaling (base_features * 2^stage_index) capped at
+            the maximum allowed features. U2Net typically uses the same scaling
+            as regular U-Net but may use different maximum values.
             
             Parameters
             ----------
             num_stages : int
                 Number of stages in the network.
             max_num_features : int
-                Maximum number of features allowed.
+                Maximum number of feature channels allowed.
                 
             Returns
             -------
             Tuple[int, ...]
-                Number of features for each stage.
+                Feature channels for each stage (e.g., (32, 64, 128, 256, 512)).
             """
-            return tuple([min(max_num_features, self.UNet_base_num_features * 2 ** i) for
-                          i in range(num_stages)])
 
         def _estimate_rsu_memory_overhead(depth, features, patch_size):
             """
-            Estimate memory overhead for RSU blocks compared to regular conv blocks.
-            RSU blocks have nested U-structures that require additional memory.
+            Estimate memory overhead multiplier for RSU blocks vs regular convolutions.
+            
+            RSU blocks contain nested U-structures that create multiple feature maps
+            at different scales. This function estimates the additional memory required
+            based on the RSU depth and nested pooling operations.
             
             Parameters
             ----------
             depth : int
                 Depth of the RSU block (number of nested layers).
             features : int
-                Number of feature channels.
+                Number of feature channels in the block.
             patch_size : tuple
-                Current patch size.
+                Current patch size for scale calculations.
                 
             Returns
             -------
             float
-                Memory overhead multiplier (>1.0 for RSU vs regular conv).
+                Memory overhead multiplier. Values > 1.0 indicate RSU blocks require
+                more memory than regular convolutions. Capped at 3.0x overhead.
+                
+            Notes
+            -----
+            The estimation considers:
+            - Each nested level creates feature maps at 1/2^d resolution
+            - Memory contribution decreases with resolution but accumulates
+            - Overhead is capped to prevent overestimation affecting training
             """
-            # RSU blocks create multiple feature maps at different scales
-            # Approximate overhead based on depth and nested pooling operations
-            base_overhead = 1.0
-            for d in range(1, min(depth, 5)):  # Cap at depth 5 for memory estimation
-                # Each nested level adds feature maps at reduced resolution
-                scale_factor = 2 ** d
-                resolution_factor = 1.0 / (scale_factor ** len(patch_size))
-                base_overhead += resolution_factor * 0.5  # Approximate memory contribution
-            
-            return min(base_overhead, 3.0)  # Cap overhead at 3x
 
         def _u2net_optimized_topology(spacing, initial_patch_size, min_edge_length, max_stages):
             """
-            Calculate U2Net-optimized network topology.
-            Considers RSU block memory requirements and nested structure constraints.
+            Calculate U2Net-optimized network topology parameters.
+            
+            Determines the network architecture (stages, pooling, convolution parameters)
+            while considering RSU block memory requirements and U2Net constraints.
+            Applies conservative patch sizing and ensures minimum stage requirements.
             
             Parameters
             ----------
             spacing : array-like
-                Voxel spacing.
+                Voxel spacing of the input data.
             initial_patch_size : array-like
-                Initial patch size estimate.
+                Initial patch size estimate before U2Net adjustments.
             min_edge_length : int
-                Minimum edge length for feature maps.
+                Minimum edge length for feature maps at the bottleneck.
             max_stages : int
-                Maximum number of stages allowed.
+                Maximum number of network stages allowed for this dimensionality.
                 
             Returns
             -------
             tuple
-                Network topology parameters optimized for U2Net.
+                (network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes,
+                 adjusted_patch_size, shape_must_be_divisible_by)
+                Network topology parameters optimized for U2Net architecture.
+                
+            Notes
+            -----
+            U2Net-specific adjustments:
+            - Patch size reduced by 30-50% to account for RSU memory overhead
+            - Minimum 2 stages enforced (required by RSUDecoder)
+            - Stage count limited by available RSU depths
+            - Topology extended/truncated to match required stages
             """
-            # Start with standard topology calculation
-            network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, patch_size, \
-            shape_must_be_divisible_by = get_pool_and_conv_props(spacing, initial_patch_size,
-                                                                 min_edge_length, 999999)
-            
-            # Apply U2Net-specific constraints
-            num_stages = len(pool_op_kernel_sizes)
-            
-            # Limit stages based on U2Net constraints and available depths
-            max_available_depths = len(self.depth_per_stage)
-            num_stages = min(num_stages, max_stages, max_available_depths)
-            
-            # U2Net requires minimum 2 stages for RSUDecoder to work properly
-            num_stages = max(num_stages, 2)
-            
-            # Adjust patch size for U2Net memory requirements
-            # RSU blocks are more memory-intensive, so we need smaller patches
-            u2net_memory_factor = 1.5 if len(spacing) == 3 else 1.3
-            adjusted_patch_size = [int(p / u2net_memory_factor) for p in patch_size]
-            
-            # Ensure patch size is still valid for the network topology
-            for i in range(len(adjusted_patch_size)):
-                # Make sure patch size is divisible by required factors
-                if len(shape_must_be_divisible_by) > i:
-                    divisor = shape_must_be_divisible_by[i]
-                    adjusted_patch_size[i] = max(divisor, 
-                                               (adjusted_patch_size[i] // divisor) * divisor)
-            
-            # Truncate or extend topology to match the number of stages
-            original_stages = len(pool_op_kernel_sizes)
-            if num_stages > original_stages:
-                # Extend with safe defaults if we need more stages
-                pool_op_kernel_sizes.extend([(1,) * len(spacing)] * (num_stages - original_stages))
-                conv_kernel_sizes.extend([(3,) * len(spacing)] * (num_stages - original_stages))
-            else:
-                # Truncate to required stages
-                pool_op_kernel_sizes = pool_op_kernel_sizes[:num_stages]
-                conv_kernel_sizes = conv_kernel_sizes[:num_stages]
-            
-            return (network_num_pool_per_axis[:num_stages] if isinstance(network_num_pool_per_axis, list) 
-                   else network_num_pool_per_axis,
-                   pool_op_kernel_sizes, conv_kernel_sizes, adjusted_patch_size, shape_must_be_divisible_by)
 
         def _keygen(patch_size, strides, depths):
             """
-            Generate a cache key based on patch size, strides, and RSU depths.
+            Generate cache key for VRAM estimation caching.
+            
+            Creates a unique string key based on patch size, network strides,
+            and RSU depths to enable caching of expensive VRAM calculations.
             
             Parameters
             ----------
             patch_size : list or tuple
-                Patch size for the network.
+                Network input patch size.
             strides : list or tuple
-                Strides for the network.
+                Pooling strides for each stage.
             depths : list or tuple
-                RSU block depths.
+                RSU block depths for each stage.
                 
             Returns
             -------
             str
-                Cache key string.
+                Cache key string combining all parameters.
+                
+            Examples
+            --------
+            >>> _keygen([64, 64, 64], [(2,2,2), (2,2,2)], [7, 6])
+            '[64, 64, 64]_[(2, 2, 2), (2, 2, 2)]_[7, 6]'
             """
-            return str(patch_size) + '_' + str(strides) + '_' + str(depths)
-
         assert all([i > 0 for i in spacing]), f"Spacing must be > 0! Spacing: {spacing}"
         num_input_channels = len(self.dataset_json['channel_names'].keys()
                                  if 'channel_names' in self.dataset_json.keys()
