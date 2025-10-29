@@ -181,6 +181,7 @@ class U2NetPlanner(ExperimentPlanner):
             Tuple[int, ...]
                 Feature channels for each stage (e.g., (32, 64, 128, 256, 512)).
             """
+            return tuple([min(self.UNet_base_num_features * 2**i, max_num_features) for i in range(num_stages)])
 
         def _estimate_rsu_memory_overhead(depth, features, patch_size):
             """
@@ -212,6 +213,19 @@ class U2NetPlanner(ExperimentPlanner):
             - Memory contribution decreases with resolution but accumulates
             - Overhead is capped to prevent overestimation affecting training
             """
+            if depth <= 1:
+                return 1.0
+            
+            # Base overhead increases with depth
+            base_overhead = 1.0 + (depth - 1) * 0.3
+            
+            # Additional overhead from nested pooling operations
+            nested_overhead = sum([1.0 / (2 ** i) for i in range(1, min(depth, 4))])
+            
+            total_overhead = base_overhead + nested_overhead * 0.2
+            
+            # Cap the overhead to prevent overestimation
+            return min(total_overhead, 3.0)
 
         def _u2net_optimized_topology(spacing, initial_patch_size, min_edge_length, max_stages):
             """
@@ -247,6 +261,45 @@ class U2NetPlanner(ExperimentPlanner):
             - Stage count limited by available RSU depths
             - Topology extended/truncated to match required stages
             """
+            # Apply U2Net memory factor to reduce patch size
+            u2net_memory_factor = 1.5 if len(spacing) == 3 else 1.3
+            conservative_patch_size = [max(16, int(p / u2net_memory_factor)) for p in initial_patch_size]
+            
+            # Get topology using the standard nnUNet method but with conservative patch size
+            network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, patch_size, \
+            shape_must_be_divisible_by = get_pool_and_conv_props(spacing, conservative_patch_size, 
+                                                                 min_edge_length, max_stages)
+            
+            # Get original stages count
+            original_stages = len(pool_op_kernel_sizes)
+            num_stages = original_stages
+            
+            # U2Net requires minimum 2 stages for RSUDecoder to work properly
+            num_stages = max(num_stages, 2)
+            
+            # Apply maximum stages limit from planner configuration
+            num_stages = min(num_stages, max_stages)
+            
+            # Limit stages by available RSU depths
+            if len(self.depth_per_stage) < num_stages:
+                num_stages = len(self.depth_per_stage)
+                num_stages = max(num_stages, 2)  # Still enforce minimum
+            
+            # If we need to extend topology for more stages
+            if num_stages > original_stages:
+                # Extend with safe defaults
+                while len(pool_op_kernel_sizes) < num_stages:
+                    pool_op_kernel_sizes.append((1,) * len(spacing))
+                while len(conv_kernel_sizes) < num_stages:
+                    conv_kernel_sizes.append((3,) * len(spacing))
+            
+            # If we need to truncate topology for fewer stages
+            elif num_stages < original_stages:
+                pool_op_kernel_sizes = pool_op_kernel_sizes[:num_stages]
+                conv_kernel_sizes = conv_kernel_sizes[:num_stages]
+            
+            return (network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, 
+                    patch_size, shape_must_be_divisible_by)
 
         def _keygen(patch_size, strides, depths):
             """
@@ -268,12 +321,8 @@ class U2NetPlanner(ExperimentPlanner):
             -------
             str
                 Cache key string combining all parameters.
-                
-            Examples
-            --------
-            >>> _keygen([64, 64, 64], [(2,2,2), (2,2,2)], [7, 6])
-            '[64, 64, 64]_[(2, 2, 2), (2, 2, 2)]_[7, 6]'
             """
+            return f"{list(patch_size)}_{list(strides)}_{list(depths)}"
         assert all([i > 0 for i in spacing]), f"Spacing must be > 0! Spacing: {spacing}"
         num_input_channels = len(self.dataset_json['channel_names'].keys()
                                  if 'channel_names' in self.dataset_json.keys()
