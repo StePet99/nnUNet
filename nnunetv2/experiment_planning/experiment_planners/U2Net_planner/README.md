@@ -9,7 +9,7 @@ The U2Net planner is responsible for configuring and preparing experiments using
 ## Usage
 
 - When preprocessing and planning, add the flag `-pl U2NetPlanner` to create plans for the U^2 Net. The plans file will be called "U2NetPlans.json".
-- When training, use the flag `-p U2NetPlans`, to address the right plans.
+- When training, use the flag `-p U2NetPlans`, to address the right plans. The results will be saved in a folder having the plans name.
 
 For Dataset002_Heart (from the MSD), for example, this looks like this:
 
