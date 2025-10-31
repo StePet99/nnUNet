@@ -82,8 +82,9 @@ class U2NetPlanner(ExperimentPlanner):
         self.depth_per_stage = [7, 6, 5, 4, 4, 4]  # if changing self.max_3d_stages or self.max_2d_stages, make sure this is consistent.
 
         # next two lines override the default values in ExperimentPlanner
-        self.UNet_max_features_3d = 512  # default is 320
         self.UNet_max_features_2d = 1024  # default is 512
+        self.UNet_max_features_3d = 512  # default is 320
+        
         
 
     def generate_data_identifier(self, configuration_name: str) -> str:
