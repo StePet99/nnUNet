@@ -44,6 +44,7 @@ class SwinUNETRPlanner(ExperimentPlanner):
         self.UNet_class = SwinUNETR
 
         # Conservative reference values for full SwinUNETR.
+        self.GPU_memory_target_in_GB = 8
         self.UNet_reference_val_3d = 1250000000
         self.UNet_reference_val_2d = 300000000
         self.UNet_reference_val_corresp_GB = 8
