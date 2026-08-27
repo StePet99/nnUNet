@@ -170,6 +170,10 @@ class SwinUNetTrainer(nnUNetTrainer):
         self.current_epoch = 0
         self.enable_deep_supervision = True
 
+        self.weight_classes = True
+        # total number of classes needed, including bg
+        self.class_weights = torch.tensor([1.0, 1.0, 5.0, 1.0]).to(self.device) 
+
         ### Dealing with labels/regions
         self.label_manager = self.plans_manager.get_label_manager(dataset_json)
         # labels can either be a list of int (regular training) or a list of tuples of int (region-based training)
@@ -262,7 +266,10 @@ class SwinUNetTrainer(nnUNetTrainer):
                 self.network = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.network)
                 self.network = DDP(self.network, device_ids=[self.local_rank])
 
-            self.loss = self._build_loss()
+            if self.weight_classes == True:
+                self.loss = self._build_weighted_loss()
+            else:
+                self.loss = self._build_loss()
 
             self.dataset_class = infer_dataset_class(self.preprocessed_dataset_folder)
 
@@ -478,6 +485,38 @@ class SwinUNetTrainer(nnUNetTrainer):
             loss = DeepSupervisionWrapper(loss, weights)
 
         return loss
+
+    def _build_weighted_loss(self):
+             
+    
+            if self.label_manager.has_regions:
+                loss = DC_and_BCE_loss({},
+                                    {'batch_dice': self.configuration_manager.batch_dice,
+                                     'do_bg': True, 'smooth': 1e-5, 'ddp': self.is_ddp},
+                                    use_ignore_label=self.label_manager.ignore_label is not None,
+                                    dice_class=MemoryEfficientSoftDiceLoss)
+            else:
+                loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
+                                    'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp},
+                                   {'weight': self.class_weights},  
+                                   weight_ce=1, weight_dice=1,
+                                   ignore_label=self.label_manager.ignore_label,
+                                   dice_class=MemoryEfficientSoftDiceLoss)
+    
+            if self._do_i_compile():
+                loss.dc = torch.compile(loss.dc)
+    
+            if self.enable_deep_supervision:
+                deep_supervision_scales = self._get_deep_supervision_scales()
+                weights = np.array([1 / (2 ** i) for i in range(len(deep_supervision_scales))])
+                if self.is_ddp and not self._do_i_compile():
+                    weights[-1] = 1e-6
+                else:
+                    weights[-1] = 0
+                weights = weights / weights.sum()
+                loss = DeepSupervisionWrapper(loss, weights)
+    
+            return loss
 
     def configure_rotation_dummyDA_mirroring_and_inital_patch_size(self):
         """
