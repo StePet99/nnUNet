@@ -1,5 +1,6 @@
 import torch
 from nnunetv2.training.loss.dice import SoftDiceLoss, MemoryEfficientSoftDiceLoss
+from nnunetv2.training.loss.hausdorff_loss import HausdorffDTLoss
 from nnunetv2.training.loss.robust_ce_loss import RobustCrossEntropyLoss, TopKLoss
 from nnunetv2.utilities.helpers import softmax_helper_dim1
 from torch import nn
@@ -103,6 +104,64 @@ class DC_and_BCE_loss(nn.Module):
             ce_loss = self.ce(net_output, target_regions)
         result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
         return result
+
+
+class DC_and_CE_and_HD_loss(nn.Module):
+    def __init__(self, soft_dice_kwargs, ce_kwargs, hd_kwargs,
+                 weight_ce=1, weight_dice=1,
+                 hd_final_weight=1.0, hd_warmup_epochs=20, hd_ramp_epochs=30,
+                 ignore_label=None, dice_class=SoftDiceLoss):
+        """
+        DC + CE loss (see DC_and_CE_loss) plus a Hausdorff-Distance-Transform
+        boundary term (HausdorffDTLoss), whose weight is scheduled rather than
+        fixed: it is 0 for the first `hd_warmup_epochs` epochs (so Dice/CE can
+        stabilize the network on something reasonable first, since the HD term
+        on near-random early predictions is unstable), then ramps up linearly
+        over `hd_ramp_epochs` epochs to `hd_final_weight`, where it stays for
+        the rest of training.
+
+        The trainer using this loss MUST call `update_weight(current_epoch)`
+        once per epoch (typically from `on_train_epoch_start`) -- this class
+        does not know the current epoch on its own.
+
+        :param soft_dice_kwargs: kwargs for the underlying SoftDiceLoss/MemoryEfficientSoftDiceLoss
+        :param ce_kwargs: kwargs for RobustCrossEntropyLoss
+        :param hd_kwargs: kwargs for HausdorffDTLoss (apply_nonlin, alpha, do_bg)
+        :param weight_ce / weight_dice: as in DC_and_CE_loss
+        :param hd_final_weight: weight the HD term reaches at the end of the ramp
+        :param hd_warmup_epochs: epochs during which HD weight stays at 0
+        :param hd_ramp_epochs: epochs over which HD weight ramps 0 -> hd_final_weight
+        :param ignore_label: as in DC_and_CE_loss
+        :param dice_class: as in DC_and_CE_loss
+        """
+        super().__init__()
+        self.dc_ce = DC_and_CE_loss(soft_dice_kwargs, ce_kwargs, weight_ce, weight_dice,
+                                     ignore_label, dice_class)
+        self.hd = HausdorffDTLoss(**hd_kwargs)
+
+        self.hd_final_weight = hd_final_weight
+        self.hd_warmup_epochs = hd_warmup_epochs
+        self.hd_ramp_epochs = hd_ramp_epochs
+        # updated once per epoch by update_weight(); starts at 0 so the HD
+        # term is inert until the trainer's first on_train_epoch_start call
+        self.weight_hd = 0.0
+
+    def update_weight(self, current_epoch: int):
+        if current_epoch < self.hd_warmup_epochs:
+            self.weight_hd = 0.0
+        elif current_epoch < self.hd_warmup_epochs + self.hd_ramp_epochs:
+            progress = (current_epoch - self.hd_warmup_epochs) / max(self.hd_ramp_epochs, 1)
+            self.weight_hd = self.hd_final_weight * progress
+        else:
+            self.weight_hd = self.hd_final_weight
+
+    def forward(self, net_output: torch.Tensor, target: torch.Tensor):
+        loss = self.dc_ce(net_output, target)
+        # skip computing the HD term entirely (incl. the CPU distance
+        # transforms) while its weight is still 0, i.e. during warmup
+        if self.weight_hd > 0:
+            loss = loss + self.weight_hd * self.hd(net_output, target)
+        return loss
 
 
 class DC_and_topk_loss(nn.Module):
